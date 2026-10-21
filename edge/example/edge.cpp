@@ -1,92 +1,119 @@
-#include <WiFi.h>
-#include <PubSubClient.h>
+// edge.cpp - Fonctions fournies pour la partie « edge » (ESP32) du TP. Ne pas modifier.
 #include "edge.h"
+#include <sys/time.h>
 
-extern PubSubClient client;
-
+// ===============================
+//      WIFI
+// ===============================
 void setup_wifi(const char *ssid, const char *password)
 {
   delay(10);
-  Serial.print("Connecting to Wi-Fi : ");
+  Serial.println();
+  Serial.print("Connexion au Wi-Fi : ");
   Serial.println(ssid);
-  Serial.println("Connecting to WiFi...");
+
+  WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
+
+  int essais = 0;
   while (WiFi.status() != WL_CONNECTED)
   {
     delay(500);
     Serial.print(".");
+    essais++;
+    if (essais > 40) // 20 secondes
+    {
+      Serial.println("\nEchec de la connexion Wi-Fi : verifiez credentials.h");
+      return;
+    }
   }
-  Serial.println("\nWiFi connected");
-  Serial.print("IP address: ");
+
+  Serial.println("\nWi-Fi connecte");
+  Serial.print("Adresse IP : ");
   Serial.println(WiFi.localIP());
 }
 
+// ===============================
+//      MQTT
+// ===============================
 void reconnect_Mqtt()
 {
   while (!client.connected())
   {
-    Serial.print("Attempting MQTT connection...");
-    if (client.connect("ESP32Client"))
+    Serial.print("Connexion au broker MQTT... ");
+
+    // Identifiant unique : deux clients avec le même identifiant se déconnectent mutuellement
+    String clientId = "ESP32-";
+    clientId += String(random(0xffff), HEX);
+
+    if (client.connect(clientId.c_str()))
     {
-      Serial.println("connected");
-      // Once connected, publish an announcement...
-      client.publish("test", "hello world");
+      Serial.println("OK");
     }
     else
     {
-      Serial.print("failed, rc=");
+      Serial.print("ECHEC, code = ");
       Serial.print(client.state());
-      Serial.println(" try again in 5 seconds");
+      Serial.println(". Nouvel essai dans 5 s");
       delay(5000);
     }
   }
 }
 
+// ===============================
+//      HEURE (NTP)
+// ===============================
 void setupTime()
 {
   configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
-  Serial.println("Synchronizing time with NTP server...");
+  Serial.println("Synchronisation de l'heure avec le serveur NTP...");
+
   struct tm timeinfo;
-  if (!getLocalTime(&timeinfo))
+  if (!getLocalTime(&timeinfo, 5000)) // attente maximale : 5 s
   {
-    Serial.println("Failed to obtain time");
-    Serial.println("Please enter the current UNIX timestamp in seconds:");
+    Serial.println("Echec de la synchronisation NTP");
+    Serial.println("Entrez le timestamp UNIX actuel en secondes (ex. sur https://www.unixtimestamp.com) :");
     while (!Serial.available())
     {
       delay(100);
     }
     String input = Serial.readStringUntil('\n');
-    T0NTP = parseUint64(input) * 1000; // Convert to milliseconds
 
-    time_t manualTime = input.toInt();
-    localtime_r(&manualTime, &timeinfo);
-    Serial.print("Manual time set to: ");
-    Serial.println(&timeinfo, "%Y-%m-%d %H:%M:%S");
+    struct timeval tv;
+    tv.tv_sec = (time_t)parseUint64(input);
+    tv.tv_usec = 0;
+    settimeofday(&tv, NULL); // l'horloge de l'ESP32 est réglée à la main
+
+    getLocalTime(&timeinfo, 0);
+    Serial.print("Heure reglee manuellement : ");
   }
   else
   {
-    T0NTP = mktime(&timeinfo) * 1000;
-    Serial.println("Time synchronized successfully");
-    Serial.print("Current time: ");
-    Serial.println(&timeinfo, "%Y-%m-%d %H:%M:%S");
+    Serial.print("Heure synchronisee : ");
   }
+  Serial.println(&timeinfo, "%Y-%m-%d %H:%M:%S");
+
+  T0NTP = unixMilis();
   T0Milis = millis();
-  Serial.print("T0NTP: ");
+  Serial.print("T0NTP : ");
   Serial.println(T0NTP);
-  Serial.print("T0Millis: ");
+  Serial.print("T0Milis : ");
   Serial.println(T0Milis);
 }
 
+// Timestamp UNIX en millisecondes (UTC, indépendant du fuseau horaire)
 uint64_t unixMilis()
 {
-  uint64_t trueMillis = T0NTP + millis() - T0Milis;
-  return trueMillis;
+  struct timeval tv;
+  gettimeofday(&tv, NULL);
+  return (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
 }
 
 uint64_t parseUint64(String s)
 {
+  s.trim();
   uint64_t result = 0;
-  for (int i = 0; i < s.length(); i++)
+  for (unsigned int i = 0; i < s.length(); i++)
   {
     char c = s.charAt(i);
     if (c >= '0' && c <= '9')

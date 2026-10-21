@@ -1,1 +1,4 @@
-*/credentials.h
+# Identifiants Wi-Fi personnels : ne jamais les versionner (quel que soit le dossier)
+credentials.h
+# Exception : le modèle fourni dans example/ (valeurs fictives uniquement)
+!example/credentials.h

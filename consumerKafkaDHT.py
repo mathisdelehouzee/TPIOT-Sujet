@@ -1,9 +1,9 @@
 from confluent_kafka import Consumer, TopicPartition
-from confluent_kafka.avro import AvroConsumer
 import matplotlib.pyplot as plt
 from matplotlib import style
 import socket
 import matplotlib
+import os
 import time
 import json
 from datetime import datetime
@@ -15,7 +15,8 @@ topics = [
     TopicPartition("humidity", 0, 0),
 ]
 conf = {
-    "bootstrap.servers": "localhost:9092",
+    # Adresse du broker Kafka (par défaut le cloud lui-même)
+    "bootstrap.servers": os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092"),
     "client.id": socket.gethostname(),
     "group.id": "test-consumer-group",
     # "schema.registry.url": "http://localhost:8081",
@@ -39,12 +40,13 @@ def freq(T):
     return (len(T) - 1) / S
 
 
-matplotlib.use("TkAgg")
+if graphing:
+    matplotlib.use("TkAgg")
 
-style.use("fivethirtyeight")
+    style.use("fivethirtyeight")
 
-fig = plt.figure()
-ax1 = fig.add_subplot(1, 1, 1)
+    fig = plt.figure()
+    ax1 = fig.add_subplot(1, 1, 1)
 
 xTemp = []
 Temp = []
@@ -52,7 +54,6 @@ xHumi = []
 Humi = []
 
 
-# consumer = AvroConsumer(conf)
 consumer = Consumer(conf)
 # consumer.assign(topics)
 consumer.subscribe(["test", "temperature", "humidity"])
@@ -83,14 +84,30 @@ def update_plot():
         NA %= na
 
 
-def process_message(topic, value, timestamp):
-    timestamp = msg.timestamp()[1] / 1000.0 - T0
+def extract_value(topic, value):
+    # Les messages de l'ESP32 sont au format {"schema": ..., "payload": {...}}
+    try:
+        data = json.loads(value)
+    except ValueError:
+        return float(value)
+    if isinstance(data, dict):
+        return float(data.get("payload", data)[topic])
+    return float(data)
+
+
+def process_message(topic, value, timestamp_ms):
+    timestamp = timestamp_ms / 1000.0 - T0
+    try:
+        number = extract_value(topic, value)
+    except (KeyError, TypeError, ValueError):
+        print(f"Cannot plot message from topic {topic}: {value}")
+        return
     if topic == "temperature":
         xTemp.append(timestamp)
-        Temp.append(float(value))
+        Temp.append(number)
     elif topic == "humidity":
         xHumi.append(timestamp)
-        Humi.append(float(value))
+        Humi.append(number)
     # Keep only the last n elements
     if len(xTemp) > n:
         xTemp.pop(0)
@@ -112,7 +129,7 @@ try:
         if msg is None:
             print("Waiting...")
         elif msg.error():
-            print("ERROR: %s".format(msg.error()))
+            print(f"ERROR: {msg.error()}")
         else:
             T.append(time.time())
             if len(T) > nm:
@@ -129,7 +146,7 @@ try:
             )
             print("")
             if graphing:
-                process_message(topic, value, timestamp)
+                process_message(topic, value, msg.timestamp()[1])
 except KeyboardInterrupt:
     pass
 finally:

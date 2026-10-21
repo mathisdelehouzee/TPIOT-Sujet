@@ -1,34 +1,22 @@
 services:
-  zookeeper:
-    image: confluentinc/cp-zookeeper:7.9.1
-    hostname: zookeeper
-    container_name: zookeeper
-    ports:
-      - "2181:2181"
-    environment:
-      ZOOKEEPER_CLIENT_PORT: 2181
-      ZOOKEEPER_TICK_TIME: 2000
-    volumes:
-      - zookeeper-data:/var/lib/zookeeper/data
-      - zookeeper-log:/var/lib/zookeeper/log
-    networks:
-      - kafka-network
-    restart: always
-
   kafka-broker:
-    image: confluentinc/cp-kafka:7.9.1
+    image: confluentinc/cp-kafka:7.9.10
     hostname: kafka-broker
     container_name: kafka-broker
-    depends_on:
-      - zookeeper
     ports:
       - "9092:9092"
       - "9093:9093"
     environment:
-      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092, PLAINTEXT_HOST://0.0.0.0:9092, PLAINTEXT_NETWORK://0.0.0.0:9093
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-broker:29092, PLAINTEXT_HOST://localhost:9092, PLAINTEXT_NETWORK://192.168.137.1:9093
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT, PLAINTEXT_HOST:PLAINTEXT, PLAINTEXT_NETWORK:PLAINTEXT
+      # Mode KRaft (sans ZooKeeper) : ce noeud unique est à la fois broker et contrôleur
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-broker:29093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      CLUSTER_ID: TPIOT-KRaft-Cluster01A
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,PLAINTEXT_HOST://0.0.0.0:9092,PLAINTEXT_NETWORK://0.0.0.0:9093,CONTROLLER://0.0.0.0:29093
+      # CLOUD_IP est défini dans le fichier .env (voir .env.example) : ip du cloud vue par le Raspberry Pi
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-broker:29092,PLAINTEXT_HOST://localhost:9092,PLAINTEXT_NETWORK://${CLOUD_IP:-192.168.137.1}:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT,PLAINTEXT_NETWORK:PLAINTEXT,CONTROLLER:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
@@ -40,40 +28,48 @@ services:
       KAFKA_UNCLEAN_LEADER_ELECTION_ENABLE: "false"
     volumes:
       - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "kafka-broker:29092", "--list"]
+      interval: 10s
+      timeout: 20s
+      retries: 12
+      start_period: 20s
     networks:
       - kafka-network
     restart: always
 
   schema-registry:
-    image: confluentinc/cp-schema-registry:7.9.1
+    image: confluentinc/cp-schema-registry:7.9.10
     container_name: schema-registry
     hostname: schema-registry
     depends_on:
-      - kafka-broker
+      kafka-broker:
+        condition: service_healthy
     ports:
       - "8081:8081"
     environment:
       SCHEMA_REGISTRY_HOST_NAME: schema-registry
       SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: 'kafka-broker:29092'
       SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
-      SCHEMA_REGISTRY_KAFKASTORE_CONNECTION_URL: 'zookeeper:2181'
     networks:
       - kafka-network
     restart: always
 
   control-center:
-    image: confluentinc/cp-enterprise-control-center:7.9.1
+    image: confluentinc/cp-enterprise-control-center:7.9.10
     hostname: control-center
     container_name: control-center
     depends_on:
-      - kafka-broker
-      - schema-registry
-      - connect
-    ports:  
+      kafka-broker:
+        condition: service_healthy
+      schema-registry:
+        condition: service_started
+      connect:
+        condition: service_started
+    ports:
       - "9021:9021"
     environment:
       CONTROL_CENTER_BOOTSTRAP_SERVERS: 'kafka-broker:29092'
-      CONTROL_CENTER_ZOOKEEPER_CONNECT: 'zookeeper:2181'
       CONTROL_CENTER_CONNECT_CONNECT-DEFAULT_CLUSTER: 'connect:8083'
       CONTROL_CENTER_CONNECT_HEALTHCHECK_ENDPOINT: '/connectors'
       CONTROL_CENTER_SCHEMA_REGISTRY_URL: "http://schema-registry:8081"
@@ -86,7 +82,7 @@ services:
     restart: always
 
   db:
-    image: timescale/timescaledb:latest-pg17
+    image: timescale/timescaledb:2.31.0-pg17
     hostname: db
     container_name: db
     ports:
@@ -100,22 +96,29 @@ services:
       PGDATA: /var/lib/postgresql/data/pgdata
     volumes:
       - db-data:/var/lib/postgresql/data
-    entrypoint: ["/bin/bash", "-c", "echo \"shared_preload_libraries = 'timescaledb'\" >> /var/lib/postgresql/data/postgresql.conf && docker-entrypoint.sh postgres"]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "user", "-d", "iot"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
     networks:
       - kafka-network
     restart: always
 
   connect:
-    image: confluentinc/kafka-connect-datagen:7.2.14
+    image: tpiot-connect:7.9.10
     hostname: connect
     container_name: connect
     build:
       context: .
       dockerfile: Dockerfile
     depends_on:
-      - kafka-broker
-      - schema-registry
-      - db
+      kafka-broker:
+        condition: service_healthy
+      schema-registry:
+        condition: service_started
+      db:
+        condition: service_healthy
     ports:
       - "8083:8083"
     environment:
@@ -133,17 +136,20 @@ services:
       CONNECT_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
       CONNECT_KEY_CONVERTER_SCHEMA_REGISTRY_URL: http://schema-registry:8081
       CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL: http://schema-registry:8081
-      CONNECT_INTERNAL_KEY_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
-      CONNECT_INTERNAL_VALUE_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
       CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE: "false"
       CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
-      CLASSPATH: /usr/share/java/monitoring-interceptors/monitoring-interceptors-7.8.0.jar
+      CLASSPATH: /usr/share/java/monitoring-interceptors/*
       CONNECT_PRODUCER_INTERCEPTOR_CLASSES: "io.confluent.monitoring.clients.interceptor.MonitoringProducerInterceptor"
       CONNECT_CONSUMER_INTERCEPTOR_CLASSES: "io.confluent.monitoring.clients.interceptor.MonitoringConsumerInterceptor"
       CONNECT_PLUGIN_PATH: "/usr/share/java,/usr/share/confluent-hub-components"
-      CONNECT_ZOOKEEPER_CONNECT: zookeeper:2181
     volumes:
       - ./connectors:/etc/kafka-connect/connectors
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8083/connectors"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 30s
     networks:
       - kafka-network
     restart: always
@@ -152,22 +158,21 @@ services:
     hostname: website
     container_name: website
     depends_on:
-      - db
+      db:
+        condition: service_healthy
     ports:
       - "8000:80"
     expose:
       - 8000
-    volumes: 
-      - ../website:/var/www/html
     environment:
-      DATABASE_URL: "postgresql://user:password@db:5432/iot?serverVersion=16&charset=utf8"
+      DATABASE_URL: "postgresql://user:password@db:5432/iot?serverVersion=17&charset=utf8"
       APP_ENV: "prod"
     networks:
       - kafka-network
     restart: always
-  
+
   mqtt:
-    image: eclipse-mosquitto:latest
+    image: eclipse-mosquitto:2.0.22
     hostname: mqtt
     container_name: mqtt
     ports:
@@ -177,7 +182,7 @@ services:
       - 1883
       - 9001
     volumes:
-      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
     networks:
       - kafka-network
     restart: always
@@ -187,10 +192,6 @@ networks:
     name: kafka-network
 
 volumes:
-  zookeeper-data:
-    name: zookeeper-data
-  zookeeper-log:
-    name: zookeeper-log
   kafka-data:
     name: kafka-data
   db-data:

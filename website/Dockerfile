@@ -24,6 +24,9 @@ RUN npm i
 
 RUN npm run build
 
+# Cache de production généré à la construction et accessible en écriture par Apache (www-data)
+RUN APP_ENV=prod php bin/console cache:warmup && chown -R www-data:www-data /var/www/var
+
 EXPOSE 80 
 
 RUN sed -i 's!/var/www/html!/var/www/public!g' \

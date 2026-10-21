@@ -1,6 +1,6 @@
-confluent_kafka
-urllib3
-requests
-avro
-matplotlib
-paho-mqtt
+confluent-kafka==2.16.0
+urllib3==2.8.0
+requests==2.34.2
+avro==1.12.2
+matplotlib==3.11.2
+paho-mqtt==2.1.0

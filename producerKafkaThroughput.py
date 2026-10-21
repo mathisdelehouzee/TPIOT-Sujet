@@ -1,13 +1,19 @@
 from confluent_kafka import Producer
 from random import randint
 from time import time, sleep
+import os
 import socket
+import sys
 
 LastMessage = 0
 
 topic = "test"
+# Adresse du broker Kafka : argument de la ligne de commande, sinon variable
+# d'environnement KAFKA_BOOTSTRAP_SERVERS, sinon le cloud lui-même.
+# Depuis une autre machine (ex : le Raspberry Pi) : python producerKafkaThroughput.py <ip du cloud>:9093
+bootstrap = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 conf = {
-    "bootstrap.servers": "192.168.137.1:9093",
+    "bootstrap.servers": bootstrap,
     "client.id": socket.gethostname(),
 }
 producer = Producer(conf)
@@ -15,7 +21,6 @@ producer = Producer(conf)
 
 def waitUntilNextMessage(interval):
     while time() - LastMessage < interval:
-        print(time() - LastMessage)
         sleep(0.001)
 
 
